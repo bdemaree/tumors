@@ -2,7 +2,7 @@
 
 master script for running pipeline to call variants on WES tumor data
 mpnst samples
-written by ben demaree 10.21.2018
+written by ben demaree 11.21.2018
 
 file requirements:
 -paired fastq files for each tumor sample (multiple lanes)
@@ -18,6 +18,8 @@ software requirements:
 
 import os
 import subprocess
+import os
+import time
 from slackclient import SlackClient
 
 class TumorSample(object):
@@ -211,6 +213,44 @@ def partition_fastq(R1_files, R2_files):
 
     return samples
 
+def generate_alignment_stats(samples, alignment_stats_file):
+    # generates a summary alignment file for all samples using info from bowtiestats files
+
+    sample_names = []
+    num_reads = []
+    alignment_rates = []
+
+    for sample in samples:
+
+        sample_names.append(sample.sample_name)
+
+        bts = open(sample.bowtie_stats, 'r')
+
+        # find number of reads and overall alignment rate in bowtiestats file
+        for line in bts:
+            if ' reads; of' in line:
+                num_reads.append(line.split(' reads; of')[0])
+
+            elif ' overall alignment rate' in line:
+                alignment_rates.append(line.split('% overall alignment rate')[0])
+
+            else:
+                continue
+
+        bts.close()
+
+    # sort lists by sample name
+    sample_names, num_reads, alignment_rates = (list(t) for t in zip(*sorted(zip(sample_names, num_reads, alignment_rates))))
+
+    asf = open(alignment_stats_file, 'w')
+
+    asf.write('sample_name\tnumber_of_reads\toverall_percent_aligned')
+
+    for i in range(len(sample_names)):
+        asf.write('\n%s\t%s\t%s' % (sample_names[i], num_reads[i], alignment_rates[i]))
+
+    asf.close()
+
 def add_ext(filename, string):
     # adds a string before the extension in a filename (do not add period to input string)
 
@@ -241,6 +281,9 @@ if __name__ == "__main__":
 
     # summary file path
     summary_file = out_dir + 'mpnst_sample_summary.txt'
+
+    # alignment stats file
+    alignment_stats = out_dir + 'mpnst_alignment_stats.tsv'
 
     # input fastq file directories
     fastq_dir = ['/drive2/hvasu/DR11_Fastq/',
@@ -284,12 +327,16 @@ Beginning tumor WES variant calling pipeline...
         try:
             sample.create_sample_folder()
         except OSError:
-            print 'Folder %s already exists. Please move or rename the existing folder!' % \
-                  (sample.sample_folder)
+            print 'Folder %s already exists. Please move or rename the existing folder!' % sample.sample_folder
             raise SystemExit
 
     # display and write sample summary file
     file_summary(samples, summary_file, to_file=True)
+
+    # send notification
+    start_time = time.time()
+    start_time_fmt = str(time.strftime('%m-%d-%Y %H:%M:%S', time.localtime(start_time)))
+    slack_message('%d samples identified. Variant calling pipeline started at %s.' % (len(samples), start_time_fmt))
 
     print '''
 ####################################################################################
@@ -302,6 +349,11 @@ Beginning tumor WES variant calling pipeline...
     # wait for all processes to finish before continuing
     wait(concatenate)
 
+    # send notification
+    elapsed_time = time.time() - start_time
+    elapsed_time_fmt = str(time.strftime('%Hh %Mm %Ss', time.gmtime(elapsed_time)))
+    slack_message('FASTQ file concatenation complete. Total elapsed time is %s.' % elapsed_time_fmt)
+
     print '''
 ####################################################################################
 # Step 2: pre-process files (cut adapters, align, convert to bam, sort)
@@ -312,6 +364,14 @@ Beginning tumor WES variant calling pipeline...
     pre_process = [sample.align_sample() for sample in samples]
     # wait for all processes to finish before continuing
     wait(pre_process)
+
+    # generate summary file for alignments
+    generate_alignment_stats(samples, alignment_stats)
+
+    # send notification
+    elapsed_time = time.time() - start_time
+    elapsed_time_fmt = str(time.strftime('%Hh %Mm %Ss', time.gmtime(elapsed_time)))
+    slack_message('Pre-processing complete. Total elapsed time is %s.' % elapsed_time_fmt)
 
     print '''
 ####################################################################################
@@ -324,6 +384,11 @@ Beginning tumor WES variant calling pipeline...
     # wait for all processes to finish before continuing
     wait(mark_dups)
 
+    # send notification
+    elapsed_time = time.time() - start_time
+    elapsed_time_fmt = str(time.strftime('%Hh %Mm %Ss', time.gmtime(elapsed_time)))
+    slack_message('Duplicate marking complete. Total elapsed time is %s.' % elapsed_time_fmt)
+
     print '''
 ####################################################################################
 # Step 4: index bam files
@@ -334,6 +399,11 @@ Beginning tumor WES variant calling pipeline...
     index_bam = [sample.index_bam() for sample in samples]
     # wait for all processes to finish before continuing
     wait(index_bam)
+
+    # send notification
+    elapsed_time = time.time() - start_time
+    elapsed_time_fmt = str(time.strftime('%Hh %Mm %Ss', time.gmtime(elapsed_time)))
+    slack_message('BAM file indexing complete. Total elapsed time is %s.' % elapsed_time_fmt)
 
     print '''
 ####################################################################################
@@ -353,15 +423,29 @@ Beginning tumor WES variant calling pipeline...
         # wait for all processes to finish before continuing
         wait(call_variants)
 
+        # send notification
+        samples_completed = str(', '.join([sample.sample_name for sample in chunk]))
+        elapsed_time = time.time() - start_time
+        elapsed_time_fmt = str(time.strftime('%Hh %Mm %Ss', time.gmtime(elapsed_time)))
+        slack_message('Variant calling completed for samples %s. Total elapsed time is %s.'
+                      % (samples_completed, elapsed_time_fmt))
+
     print '''
 ####################################################################################
-# Step 6: create alignment summary file
+# Step 6: cleanup files
 ####################################################################################
 '''
 
-    # TODO write aln summary
+    # remove old bam files (preprocessed version without marked duplicates)
+    # check all deduplicated bam files have some data in them (>100 MB), then delete originals
+
+    for sample in samples:
+        if os.path.getsize(sample.bamfile_dedup) > 1e8:
+            os.remove(sample.bamfile)
 
     print 'Pipeline complete!'
 
-
-
+    # send notification
+    elapsed_time = time.time() - start_time
+    elapsed_time_fmt = str(time.strftime('%Hh %Mm %Ss', time.gmtime(elapsed_time)))
+    slack_message('Pipeline complete! Total elapsed time is %s.' % elapsed_time_fmt)
