@@ -7,6 +7,8 @@ written by ben demaree 11.21.2018
 file requirements:
 -paired fastq files for each tumor sample (multiple lanes)
 -human reference genome (bt2 index, fasta, dict, fai)
+-interval file
+-dbsnp database
 
 software requirements:
 -bowtie2
@@ -242,10 +244,9 @@ def generate_alignment_stats(samples, alignment_stats_file):
     # sort lists by sample name
     sample_names, num_reads, alignment_rates = (list(t) for t in zip(*sorted(zip(sample_names, num_reads, alignment_rates))))
 
+    # write to summary file
     asf = open(alignment_stats_file, 'w')
-
     asf.write('sample_name\tnumber_of_reads\toverall_percent_aligned')
-
     for i in range(len(sample_names)):
         asf.write('\n%s\t%s\t%s' % (sample_names[i], num_reads[i], alignment_rates[i]))
 
